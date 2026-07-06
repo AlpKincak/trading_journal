@@ -45,6 +45,15 @@ class RMethod(enum.StrEnum):
     UNKNOWN = "unknown"
 
 
+class SyncStatus(enum.StrEnum):
+    """Outcome of a broker sync run."""
+
+    SUCCESS = "SUCCESS"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    DRY_RUN = "DRY_RUN"
+
+
 _SIDE_ALIASES: dict[str, str] = {
     "buy": Side.BUY.value,
     "b": Side.BUY.value,
@@ -99,6 +108,14 @@ class Account(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
     broker: Mapped[str | None] = mapped_column(String(120), nullable=True)
     base_currency: Mapped[str] = mapped_column(String(10), nullable=False, default="USD")
+
+    # Phase 2 sync metadata (nullable / defaulted for backward compatibility).
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="local")
+    external_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    external_account_number: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    environment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow, nullable=False
@@ -176,6 +193,15 @@ class Trade(Base):
 
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Phase 2 sync metadata (all nullable for backward compatibility).
+    external_position_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    external_order_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    external_account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    external_account_number: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    external_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow, nullable=False
@@ -196,3 +222,61 @@ class Trade(Base):
     @property
     def is_open(self) -> bool:
         return self.status == TradeStatus.OPEN.value
+
+
+class SyncRun(Base):
+    """A record of one broker-sync attempt (audit trail for the Sync tab/CLI)."""
+
+    __tablename__ = "sync_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tradelocker")
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=SyncStatus.SUCCESS.value
+    )
+    environment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    acc_num: Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+    imported_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    updated_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    skipped_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    warning_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    error_count: Mapped[int] = mapped_column(default=0, nullable=False)
+
+    summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"<SyncRun id={self.id} source={self.source} status={self.status} "
+            f"imported={self.imported_count} updated={self.updated_count}>"
+        )
+
+
+class SyncState(Base):
+    """A key/value cursor for incremental sync (e.g. last history timestamp).
+
+    Scoped by ``(source, environment, account_id, acc_num, key)``.
+    """
+
+    __tablename__ = "sync_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tradelocker")
+    environment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    acc_num: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    key: Mapped[str] = mapped_column(String(60), nullable=False)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"<SyncState {self.source}/{self.environment}/{self.account_id} "
+            f"{self.key}={self.value!r}>"
+        )

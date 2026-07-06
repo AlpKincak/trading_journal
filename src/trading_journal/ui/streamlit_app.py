@@ -14,6 +14,12 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
+from trading_journal.config import get_tradelocker_settings
+from trading_journal.connectors.tradelocker import (
+    TradeLockerConfigError,
+    TradeLockerError,
+    TradeLockerReadOnlyClient,
+)
 from trading_journal.db import init_db, session_scope
 from trading_journal.formatting import fmt_money, fmt_num, fmt_pct, fmt_r, fmt_ratio
 from trading_journal.importers.csv_importer import import_parsed, parse_trades_frame
@@ -29,6 +35,8 @@ from trading_journal.services.account_service import (
     list_accounts,
     snapshots_dataframe,
 )
+from trading_journal.services.sync_service import build_sync_service
+from trading_journal.services.sync_state_service import sync_runs_dataframe
 from trading_journal.services.trade_service import (
     distinct_symbols,
     trades_dataframe,
@@ -433,6 +441,174 @@ def render_account(account_id: int | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tab: Sync (read-only TradeLocker)
+# ---------------------------------------------------------------------------
+def _render_sync_config_summary() -> object:
+    """Show the TradeLocker config summary (no secrets) and return the settings."""
+    settings = get_tradelocker_settings()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Enabled", "Yes" if settings.enabled else "No")
+    c2.metric("Environment", settings.environment)
+    c3.metric("Credentials", "Present" if settings.has_credentials else "Missing")
+    c4.metric("Default account", settings.account_id or "—")
+    st.caption(
+        f"Base URL: `{settings.base_url}`  ·  email: {settings.masked_email}  ·  "
+        f"accNum: {settings.acc_num or '—'}  ·  lookback: {settings.lookback_days}d  ·  "
+        "**read-only** — this never places, modifies, or closes trades."
+    )
+    if not settings.has_credentials:
+        missing = ", ".join(settings.missing_credential_fields())
+        st.info(
+            f"TradeLocker credentials are not set ({missing}). Add them to your `.env` "
+            "to enable health checks and syncing. The rest of the dashboard works without them."
+        )
+    return settings
+
+
+def _render_sync_result(result) -> None:
+    st.write(
+        f"**Result:** `{result.status}`"
+        + ("  *(dry run — nothing written)*" if result.dry_run else "")
+    )
+    m = st.columns(4)
+    m[0].metric("Imported", result.trades_imported)
+    m[1].metric("Updated", result.trades_updated)
+    m[2].metric("Skipped", result.trades_skipped)
+    m[3].metric("Snapshots", result.snapshots_imported)
+    m2 = st.columns(3)
+    m2[0].metric("Open positions seen", result.open_positions_seen)
+    m2[1].metric("Closed rows seen", result.closed_rows_seen)
+    m2[2].metric("Accounts seen", result.accounts_seen)
+    if result.errors:
+        st.error("Errors:\n" + "\n".join(f"- {e}" for e in result.errors))
+    if result.warnings:
+        with st.expander(f"Data-quality warnings ({len(result.warnings)})"):
+            for warning in result.warnings:
+                st.write(f"- {warning}")
+
+
+def render_sync() -> None:
+    st.subheader("TradeLocker sync (read-only)")
+    st.caption(
+        "Pull accounts, open positions, closed history, and balance/equity from "
+        "TradeLocker into this local journal. No orders are ever placed, modified, "
+        "or closed."
+    )
+    settings = _render_sync_config_summary()
+    st.divider()
+
+    # --- inputs ---
+    with st.expander("Sync target", expanded=True):
+        i1, i2, i3 = st.columns(3)
+        account_id = i1.text_input("Account ID", value=settings.account_id or "")
+        acc_num = i2.text_input("accNum (optional)", value=settings.acc_num or "")
+        lookback = i3.number_input(
+            "Lookback (days)", min_value=1, max_value=3650, value=int(settings.lookback_days)
+        )
+        sync_all = st.checkbox("Sync all discovered accounts", value=False)
+
+    # --- read-only actions ---
+    b1, b2, b3, b4 = st.columns(4)
+    do_health = b1.button("Health check", width="stretch")
+    do_accounts = b2.button("List accounts", width="stretch")
+    do_dry_run = b3.button("Dry-run sync", type="secondary", width="stretch")
+    do_apply = b4.button("Apply import", type="primary", width="stretch")
+    st.caption(
+        "**Apply import** writes only to this local journal (read-only against your "
+        "broker). Dry-run previews the same counts without writing."
+    )
+
+    def _client() -> TradeLockerReadOnlyClient:
+        return TradeLockerReadOnlyClient.from_settings(settings)
+
+    def _service():
+        return build_sync_service(settings)
+
+    def _run_sync(dry_run: bool):
+        try:
+            with session_scope() as session:
+                service = _service()
+                if sync_all:
+                    return service.sync_all_configured_accounts(
+                        session, lookback_days=int(lookback), dry_run=dry_run
+                    )
+                if not account_id:
+                    st.warning("Enter an Account ID or tick 'Sync all discovered accounts'.")
+                    return None
+                return service.sync_account(
+                    session,
+                    account_id.strip(),
+                    acc_num.strip() or None,
+                    lookback_days=int(lookback),
+                    dry_run=dry_run,
+                )
+        except TradeLockerConfigError as exc:
+            st.error(f"Configuration problem: {exc}")
+        except TradeLockerError as exc:
+            st.error(f"TradeLocker error: {exc}")
+        return None
+
+    if do_health:
+        result = _client().health_check()
+        (st.success if result.ok else st.error)(
+            f"{'OK' if result.ok else 'FAILED'} · env={result.environment} · "
+            f"authenticated={result.authenticated} · accounts={result.accounts_found}\n\n"
+            f"{result.message}"
+        )
+
+    if do_accounts:
+        try:
+            client = _client()
+            client.authenticate()
+            accounts = client.list_accounts()
+            if not accounts:
+                st.info("No TradeLocker accounts found for these credentials/environment.")
+            else:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "account_id": a.account_id,
+                                "accNum": a.acc_num,
+                                "currency": a.currency,
+                                "balance": a.balance,
+                                "name": a.name,
+                            }
+                            for a in accounts
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+        except TradeLockerConfigError as exc:
+            st.error(f"Configuration problem: {exc}")
+        except TradeLockerError as exc:
+            st.error(f"TradeLocker error: {exc}")
+
+    if do_dry_run:
+        result = _run_sync(dry_run=True)
+        if result is not None:
+            st.info("Dry run complete — nothing was written.")
+            _render_sync_result(result)
+
+    if do_apply:
+        result = _run_sync(dry_run=False)
+        if result is not None:
+            st.success("Import complete.")
+            _render_sync_result(result)
+
+    # --- recent runs (always shown; read-only DB query, no network) ---
+    st.divider()
+    st.subheader("Recent sync runs")
+    with session_scope() as session:
+        runs = sync_runs_dataframe(session, limit=20)
+    if runs.empty:
+        st.caption("No sync runs yet.")
+    else:
+        st.dataframe(runs, hide_index=True, width="stretch")
+
+
+# ---------------------------------------------------------------------------
 # Tab: Help / Data Quality
 # ---------------------------------------------------------------------------
 def _missing_data_report(trades: pd.DataFrame) -> pd.DataFrame:
@@ -513,7 +689,8 @@ Each component reports a confidence based on sample size. **LOW** confidence mea
 def main() -> None:
     st.title("📈 Trading Journal")
     st.caption(
-        "A local, TradeZella-lite forex journal — Phase 1 (no live trading, no broker sync)."
+        "A local, TradeZella-lite forex journal — with read-only TradeLocker sync "
+        "(no live trading, no order placement)."
     )
 
     accounts = load_accounts()
@@ -529,13 +706,13 @@ def main() -> None:
         else:
             st.info("No account yet.\nSeed demo data on the Import tab.")
         st.divider()
-        st.caption("Phase 2 (planned): read-only TradeLocker sync.")
+        st.caption("The **Sync** tab pulls read-only data from TradeLocker.")
 
     trades = load_trades(account_id)
     snaps = load_snapshots(account_id)
 
-    tab_dash, tab_trades, tab_import, tab_account, tab_help = st.tabs(
-        ["Dashboard", "Trades", "Import", "Account", "Help / Data Quality"]
+    tab_dash, tab_trades, tab_import, tab_account, tab_sync, tab_help = st.tabs(
+        ["Dashboard", "Trades", "Import", "Account", "Sync", "Help / Data Quality"]
     )
     with tab_dash:
         render_dashboard(trades, snaps)
@@ -545,6 +722,8 @@ def main() -> None:
         render_import(account_id)
     with tab_account:
         render_account(account_id)
+    with tab_sync:
+        render_sync()
     with tab_help:
         render_help(trades)
 

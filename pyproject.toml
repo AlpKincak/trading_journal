@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading_journal"
-version = "0.1.0"
-description = "A local, TradeZella-lite forex trading journal and dashboard (Phase 1)."
+version = "0.2.0"
+description = "A local, TradeZella-lite forex trading journal with read-only TradeLocker sync."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "trading_journal" }]
-keywords = ["forex", "trading", "journal", "dashboard", "streamlit"]
+keywords = ["forex", "trading", "journal", "dashboard", "streamlit", "tradelocker"]
 
 dependencies = [
     "SQLAlchemy>=2.0",
@@ -19,6 +19,7 @@ dependencies = [
     "plotly>=5.18",
     "pydantic>=2.5",
     "python-dateutil>=2.8",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
