@@ -13,9 +13,19 @@ Design notes
 from __future__ import annotations
 
 import enum
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -42,7 +52,37 @@ class RMethod(enum.StrEnum):
 
     MONEY = "money"
     PRICE = "price"
+    MANUAL = "manual"
     UNKNOWN = "unknown"
+
+
+class ReviewStatus(enum.StrEnum):
+    """Where a trade sits in the review workflow."""
+
+    UNREVIEWED = "UNREVIEWED"
+    REVIEWED = "REVIEWED"
+    NEEDS_FIX = "NEEDS_FIX"
+
+
+class MistakeCategory(enum.StrEnum):
+    """Generic, non-strategy-specific journaling categories for review.
+
+    These describe *process/execution* mistakes, not trading setups, so they stay
+    within the journal's non-strategy scope.
+    """
+
+    EARLY_ENTRY = "EARLY_ENTRY"
+    LATE_ENTRY = "LATE_ENTRY"
+    EARLY_EXIT = "EARLY_EXIT"
+    LATE_EXIT = "LATE_EXIT"
+    OVER_RISK = "OVER_RISK"
+    MOVED_STOP = "MOVED_STOP"
+    NO_STOP = "NO_STOP"
+    REVENGE_TRADE = "REVENGE_TRADE"
+    IMPULSE_TRADE = "IMPULSE_TRADE"
+    MISREAD_MARKET = "MISREAD_MARKET"
+    DATA_ISSUE = "DATA_ISSUE"
+    OTHER = "OTHER"
 
 
 class SyncStatus(enum.StrEnum):
@@ -92,6 +132,35 @@ def normalize_status(value: object) -> str | None:
         return None
     key = str(value).strip().lower()
     return _STATUS_ALIASES.get(key)
+
+
+def normalize_review_status(value: object) -> str | None:
+    """Map a free-form review status to the canonical vocabulary (or None)."""
+    if value is None:
+        return None
+    key = str(value).strip().upper().replace(" ", "_").replace("-", "_")
+    try:
+        return ReviewStatus(key).value
+    except ValueError:
+        return None
+
+
+def normalize_mistake_category(value: object) -> str | None:
+    """Map a free-form mistake category to the canonical vocabulary (or None).
+
+    An empty/blank value clears the category (returns ``None`` without error);
+    an unrecognized non-blank value also returns ``None`` so callers can decide
+    whether to reject it.
+    """
+    if value is None:
+        return None
+    key = str(value).strip().upper().replace(" ", "_").replace("-", "_")
+    if not key:
+        return None
+    try:
+        return MistakeCategory(key).value
+    except ValueError:
+        return None
 
 
 def _utcnow() -> datetime:
@@ -193,6 +262,21 @@ class Trade(Base):
 
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Phase 3 review workflow + manual-correction metadata (all nullable/defaulted
+    # for backward compatibility with Phase 1/2 databases).
+    review_status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default=ReviewStatus.UNREVIEWED.value
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mistake_category: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    is_manual: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_manual_overrides: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    manual_override_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_quality_flags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Phase 2 sync metadata (all nullable for backward compatibility).
     external_position_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     external_order_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
@@ -279,4 +363,42 @@ class SyncState(Base):
         return (
             f"<SyncState {self.source}/{self.environment}/{self.account_id} "
             f"{self.key}={self.value!r}>"
+        )
+
+
+class DailyReview(Base):
+    """A generic daily review note with optional self-scores (0-100).
+
+    Not strategy-specific: it captures process/discipline reflections keyed by
+    date (optionally scoped to an account). Uniqueness is on
+    ``(account_id, review_date)`` so at most one review exists per account per day.
+    """
+
+    __tablename__ = "daily_reviews"
+    __table_args__ = (
+        UniqueConstraint("account_id", "review_date", name="uq_daily_review_account_date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    review_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mood: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    discipline_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    execution_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lesson: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"<DailyReview id={self.id} account_id={self.account_id} "
+            f"date={self.review_date} discipline={self.discipline_score}>"
         )

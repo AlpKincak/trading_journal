@@ -37,8 +37,9 @@ def isolated_app(tmp_path, monkeypatch) -> Iterator[None]:
 def test_dashboard_renders_with_sync_tab(isolated_app):
     at = AppTest.from_file(APP_PATH, default_timeout=60).run()
     assert not at.exception
-    # Six tabs now, including Sync.
-    assert len(at.tabs) == 6
+    # Phase 3: eight tabs (Dashboard, Trades, Analytics, Calendar/Reviews, Import,
+    # Sync, Account/Backup, Help/Data Quality).
+    assert len(at.tabs) == 8
     subheaders = [s.value for s in at.subheader]
     assert any("TradeLocker sync" in text for text in subheaders)
 

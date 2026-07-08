@@ -49,7 +49,21 @@ TRADE_COLUMNS: list[str] = [
     "realized_r",
     "r_method",
     "notes",
+    # Phase 3 review workflow + manual-correction metadata.
+    "review_status",
+    "reviewed_at",
+    "review_notes",
+    "mistake_category",
+    "exit_reason",
+    "is_manual",
+    "has_manual_overrides",
+    "data_quality_flags_json",
+    # Phase 2 sync metadata surfaced for data-quality / detail views.
+    "external_status",
+    "last_synced_at",
 ]
+
+_DATE_COLUMNS = ("opened_at", "closed_at", "reviewed_at", "last_synced_at")
 
 _NUMERIC_COLUMNS = [
     "entry_price",
@@ -207,13 +221,13 @@ def trades_to_dataframe(trades: Iterable[Any]) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=TRADE_COLUMNS)
     if df.empty:
         # Guarantee correct dtypes on empty frames so downstream filters work.
-        for col in ("opened_at", "closed_at"):
+        for col in _DATE_COLUMNS:
             df[col] = pd.to_datetime(df[col], errors="coerce")
         for col in _NUMERIC_COLUMNS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
 
-    for col in ("opened_at", "closed_at"):
+    for col in _DATE_COLUMNS:
         df[col] = pd.to_datetime(df[col], errors="coerce")
     for col in _NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -245,7 +259,7 @@ def _ensure_dataframe(trades: pd.DataFrame | Iterable[Any]) -> pd.DataFrame:
         for col in TRADE_COLUMNS:
             if col not in df.columns:
                 df[col] = None
-        for col in ("opened_at", "closed_at"):
+        for col in _DATE_COLUMNS:
             df[col] = pd.to_datetime(df[col], errors="coerce")
         for col in _NUMERIC_COLUMNS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -290,6 +304,97 @@ def daily_pnl_frame(closed_with_pnl: pd.DataFrame) -> pd.DataFrame:
     )
     grouped["cumulative_net_pnl"] = grouped["net_pnl"].cumsum()
     return grouped[columns]
+
+
+def daily_r_frame(closed_with_r: pd.DataFrame) -> pd.DataFrame:
+    """Build a per-day realized-R frame keyed on ``closed_at``.
+
+    Columns: ``date``, ``realized_r`` (daily sum), ``cumulative_realized_r``.
+    """
+    columns = ["date", "realized_r", "cumulative_realized_r"]
+    dated = closed_with_r.dropna(subset=["closed_at", "realized_r"])
+    if dated.empty:
+        return pd.DataFrame(columns=columns)
+    grouped = (
+        dated.assign(date=dated["closed_at"].dt.normalize())
+        .groupby("date", as_index=False)["realized_r"]
+        .sum()
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    grouped["cumulative_realized_r"] = grouped["realized_r"].cumsum()
+    return grouped[columns]
+
+
+@dataclass
+class DayDetail:
+    """Per-day summary used by the Calendar/Reviews day-detail panel."""
+
+    date: Any
+    net_pnl: float = 0.0
+    total_realized_r: float = 0.0
+    avg_realized_r: float | None = None
+    trade_count: int = 0
+    closed_count: int = 0
+    open_count: int = 0
+    winning_count: int = 0
+    losing_count: int = 0
+    breakeven_count: int = 0
+    best_trade: dict[str, Any] | None = None
+    worst_trade: dict[str, Any] | None = None
+
+
+def trades_on_day(trades: pd.DataFrame | Iterable[Any], day: Any) -> pd.DataFrame:
+    """Return trades opened or closed on the given calendar ``day``."""
+    df = _ensure_dataframe(trades)
+    if df.empty:
+        return df
+    target = pd.Timestamp(day).normalize()
+    opened = df["opened_at"].dt.normalize()
+    closed = df["closed_at"].dt.normalize()
+    mask = (opened == target) | (closed == target)
+    return df[mask].copy()
+
+
+def day_detail(trades: pd.DataFrame | Iterable[Any], day: Any) -> DayDetail:
+    """Compute the net P&L, realized R, and win/loss breakdown for one day.
+
+    P&L and R are attributed to the day a trade *closed* (was realized). Open
+    counts reflect positions opened that day. Never raises on empty/missing data.
+    """
+    df = _ensure_dataframe(trades)
+    target = pd.Timestamp(day).normalize()
+    detail = DayDetail(date=pd.Timestamp(day).date())
+    if df.empty:
+        return detail
+
+    status = df["status"].astype("string").str.upper()
+    closed = df[status == TradeStatus.CLOSED.value]
+    closed_day = closed[closed["closed_at"].dt.normalize() == target]
+    opened_day = df[df["opened_at"].dt.normalize() == target]
+
+    with_pnl = closed_day[closed_day["net_pnl"].notna()]
+    winners = with_pnl[with_pnl["net_pnl"] > 0]
+    losers = with_pnl[with_pnl["net_pnl"] < 0]
+    breakeven = with_pnl[with_pnl["net_pnl"] == 0]
+    with_r = closed_day[closed_day["realized_r"].notna()]
+
+    detail.net_pnl = _sum(with_pnl["net_pnl"])
+    detail.total_realized_r = _sum(with_r["realized_r"])
+    detail.avg_realized_r = _mean_or_none(with_r["realized_r"])
+    detail.closed_count = int(len(closed_day))
+    detail.open_count = int(
+        len(opened_day[opened_day["status"].astype("string").str.upper() == TradeStatus.OPEN.value])
+    )
+    detail.trade_count = int(len(trades_on_day(df, day)))
+    detail.winning_count = int(len(winners))
+    detail.losing_count = int(len(losers))
+    detail.breakeven_count = int(len(breakeven))
+
+    if not with_pnl.empty:
+        detail.best_trade = with_pnl.loc[with_pnl["net_pnl"].idxmax()].to_dict()
+        detail.worst_trade = with_pnl.loc[with_pnl["net_pnl"].idxmin()].to_dict()
+    return detail
 
 
 def _max_drawdown(daily: pd.DataFrame) -> float | None:

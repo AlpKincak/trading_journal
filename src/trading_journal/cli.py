@@ -5,7 +5,14 @@ Commands
 * ``init-db``               Create the SQLite schema.
 * ``seed-demo``             Load the bundled deterministic demo data.
 * ``import-csv PATH``       Import trades from a CSV file.
+* ``add-trade``             Add a manual trade locally.
 * ``metrics``               Print a summary of dashboard metrics.
+* ``review-day DATE``       Show a day's summary and add/update its daily review.
+* ``data-quality``          Print data-quality checks and the Needs-Review count.
+* ``export-csv``            Export all tables to CSV files.
+* ``export-json``           Export all tables to a single JSON file.
+* ``backup``                Write a timestamped zip backup (DB + CSV + JSON).
+* ``restore-backup PATH``   Restore the database from a backup zip (conservative).
 * ``dashboard``             Launch the Streamlit dashboard.
 * ``tradelocker-health``    Check TradeLocker config/auth (read-only).
 * ``tradelocker-accounts``  List available TradeLocker accounts (read-only).
@@ -21,7 +28,10 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
+
+import pandas as pd
 
 from . import __version__
 from .config import get_settings, get_tradelocker_settings
@@ -30,18 +40,39 @@ from .connectors.tradelocker import (
     TradeLockerError,
     TradeLockerReadOnlyClient,
 )
-from .db import init_db, session_scope
+from .data_quality import data_quality_report, needs_review_frame
+from .db import init_db, reset_engine_cache, session_scope
 from .formatting import fmt_money, fmt_num, fmt_pct, fmt_r, fmt_ratio
 from .importers.csv_importer import import_csv
 from .journal_score import compute_journal_score
-from .metrics import compute_metrics
+from .metrics import compute_metrics, day_detail
 from .seed import seed_demo
-from .services.account_service import snapshots_dataframe
+from .services.account_service import get_or_create_default_account, snapshots_dataframe
+from .services.backup_service import (
+    create_backup,
+    inspect_backup,
+    restore_backup,
+    sqlite_path_from_session,
+)
+from .services.backup_service import (
+    export_csv as export_csv_files,
+)
+from .services.backup_service import (
+    export_json as export_json_file,
+)
+from .services.review_service import DailyReviewInput, daily_reviews_dataframe, upsert_daily_review
 from .services.sync_service import SyncResult, build_sync_service
 from .services.sync_state_service import sync_runs_dataframe
-from .services.trade_service import trades_dataframe
+from .services.trade_service import ManualTradeInput, add_trade, trades_dataframe
 
 APP_PATH = Path(__file__).resolve().parent / "ui" / "streamlit_app.py"
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    """Parse a CLI date/datetime string, or None. Raises ValueError on bad input."""
+    if value is None or str(value).strip() == "":
+        return None
+    return pd.to_datetime(value).to_pydatetime()
 
 
 def _cmd_init_db(_: argparse.Namespace) -> int:
@@ -91,8 +122,9 @@ def _cmd_metrics(_: argparse.Namespace) -> int:
     with session_scope() as session:
         trades = trades_dataframe(session)
         snaps = snapshots_dataframe(session)
+        reviews = daily_reviews_dataframe(session)
     metrics = compute_metrics(trades, snaps)
-    score = compute_journal_score(trades, metrics)
+    score = compute_journal_score(trades, metrics, reviews)
 
     if metrics.trade_count == 0:
         print("No trades yet. Run 'trading-journal seed-demo' or import a CSV.")
@@ -128,6 +160,185 @@ def _cmd_metrics(_: argparse.Namespace) -> int:
             f"{component.points:.1f}/{component.max_points:.0f}  [{component.confidence}]",
         )
     print("\nNote: Journal Score is a transparent local score, not TradeZella's Zella Score.")
+    return 0
+
+
+def _cmd_add_trade(args: argparse.Namespace) -> int:
+    try:
+        payload = ManualTradeInput(
+            symbol=args.symbol,
+            side=args.side,
+            status=args.status,
+            opened_at=_parse_dt(args.opened_at),
+            closed_at=_parse_dt(args.closed_at),
+            entry_price=args.entry_price,
+            exit_price=args.exit_price,
+            quantity=args.quantity,
+            stop_loss=args.stop_loss,
+            take_profit=args.take_profit,
+            initial_risk_amount=args.risk,
+            gross_pnl=args.gross_pnl,
+            fees=args.fees,
+            net_pnl=args.net_pnl,
+            notes=args.notes,
+        )
+    except (ValueError, TypeError) as exc:
+        print(f"Error: invalid trade input: {exc}", file=sys.stderr)
+        return 2
+
+    init_db()
+    with session_scope() as session:
+        account_id = args.account_id or get_or_create_default_account(session).id
+        trade = add_trade(session, account_id, payload)
+        summary = (
+            f"#{trade.id} {trade.symbol} {trade.side} {trade.status} "
+            f"net_pnl={fmt_money(trade.net_pnl)} planned_rr={fmt_num(trade.planned_rr)} "
+            f"realized_r={fmt_r(trade.realized_r)} ({trade.r_method or '—'})"
+        )
+    print(f"Added manual trade: {summary}")
+    return 0
+
+
+def _cmd_review_day(args: argparse.Namespace) -> int:
+    try:
+        day = pd.to_datetime(args.date).date()
+    except (ValueError, TypeError):
+        print(f"Error: could not parse date: {args.date!r}", file=sys.stderr)
+        return 2
+
+    init_db()
+    with session_scope() as session:
+        account_id = args.account_id or get_or_create_default_account(session).id
+        trades = trades_dataframe(session, account_id=account_id)
+        detail = day_detail(trades, day)
+
+        wrote_review = any(
+            v is not None
+            for v in (
+                args.notes,
+                args.mood,
+                args.discipline,
+                args.risk,
+                args.execution,
+                args.lesson,
+            )
+        )
+        if wrote_review:
+            try:
+                review = DailyReviewInput(
+                    review_date=day,
+                    notes=args.notes,
+                    mood=args.mood,
+                    discipline_score=args.discipline,
+                    risk_score=args.risk,
+                    execution_score=args.execution,
+                    lesson=args.lesson,
+                )
+            except (ValueError, TypeError) as exc:
+                print(f"Error: invalid review input: {exc}", file=sys.stderr)
+                return 2
+            upsert_daily_review(session, account_id, review)
+
+    print(f"Day review — {day:%Y-%m-%d}")
+    print("-" * 42)
+    _print_metric("Net P&L", fmt_money(detail.net_pnl))
+    _print_metric("Total realized R", fmt_r(detail.total_realized_r))
+    _print_metric("Avg realized R", fmt_r(detail.avg_realized_r))
+    _print_metric("Trades (day)", str(detail.trade_count))
+    _print_metric("Closed / opened", f"{detail.closed_count} / {detail.open_count}")
+    _print_metric(
+        "Wins / Losses / BE",
+        f"{detail.winning_count} / {detail.losing_count} / {detail.breakeven_count}",
+    )
+    if detail.best_trade:
+        _print_metric("Best trade", fmt_money(detail.best_trade.get("net_pnl")))
+    if detail.worst_trade:
+        _print_metric("Worst trade", fmt_money(detail.worst_trade.get("net_pnl")))
+    if wrote_review:
+        print("\nDaily review saved.")
+    return 0
+
+
+def _cmd_data_quality(args: argparse.Namespace) -> int:
+    init_db()
+    with session_scope() as session:
+        trades = trades_dataframe(session, account_id=args.account_id)
+    if trades.empty:
+        print("No trades yet. Run 'trading-journal seed-demo' or import a CSV.")
+        return 0
+
+    report = data_quality_report(trades)
+    print("Data-quality checks")
+    print("-" * 42)
+    for _, row in report.iterrows():
+        _print_metric(row["Check"], str(int(row["Count"])))
+
+    queue = needs_review_frame(trades)
+    print("-" * 42)
+    _print_metric("Trades needing review", str(len(queue)))
+    for _, row in queue.head(args.limit).iterrows():
+        opened = row.get("opened_at")
+        opened_str = opened.strftime("%Y-%m-%d") if pd.notna(opened) else "—"
+        print(f"  #{int(row['id'])} {opened_str} {row['symbol']} {row['side']}: {row['reasons']}")
+    if len(queue) > args.limit:
+        print(f"  … and {len(queue) - args.limit} more")
+    return 0
+
+
+def _cmd_export_csv(args: argparse.Namespace) -> int:
+    init_db()
+    with session_scope() as session:
+        paths = export_csv_files(session, args.out)
+    print(f"Exported {len(paths)} CSV files to {args.out}:")
+    for path in paths:
+        print(f"  - {path.name}")
+    return 0
+
+
+def _cmd_export_json(args: argparse.Namespace) -> int:
+    init_db()
+    with session_scope() as session:
+        path = export_json_file(session, args.out)
+    print(f"Exported JSON to {path}")
+    return 0
+
+
+def _cmd_backup(args: argparse.Namespace) -> int:
+    init_db()
+    with session_scope() as session:
+        zip_path = create_backup(session, args.out)
+    print(f"Backup written: {zip_path}")
+    return 0
+
+
+def _cmd_restore_backup(args: argparse.Namespace) -> int:
+    info = inspect_backup(args.path)
+    if not info.valid:
+        print(f"Error: invalid backup: {'; '.join(info.problems)}", file=sys.stderr)
+        return 2
+
+    init_db()
+    with session_scope() as session:
+        target = sqlite_path_from_session(session)
+    if target is None:
+        target = get_settings().db_path
+
+    counts = info.manifest.get("counts", {})
+    print(f"Backup contains database '{info.database_file}' with counts: {counts}")
+    print(f"This will REPLACE the current database at: {target}")
+    if not args.yes:
+        print(
+            "Refusing to overwrite without confirmation. Re-run with --yes to proceed "
+            "(the current database is backed up first).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Drop pooled connections so the SQLite file is not held open during replace.
+    reset_engine_cache()
+    result = restore_backup(args.path, target, make_backup=True)
+    reset_engine_cache()
+    print(result.message)
     return 0
 
 
@@ -297,7 +508,66 @@ def build_parser() -> argparse.ArgumentParser:
     p_import.add_argument("path", help="Path to the CSV file.")
     p_import.set_defaults(func=_cmd_import_csv)
 
+    p_add = sub.add_parser("add-trade", help="Add a manual trade locally.")
+    p_add.add_argument("--symbol", required=True, help="Instrument symbol, e.g. EURUSD.")
+    p_add.add_argument("--side", required=True, help="buy/sell (long/short).")
+    p_add.add_argument("--status", default="open", help="open or closed (default: open).")
+    p_add.add_argument("--opened-at", required=True, help="Open time, e.g. '2025-03-01 09:00'.")
+    p_add.add_argument("--closed-at", help="Close time (required for a closed trade).")
+    p_add.add_argument("--entry-price", type=float, required=True, help="Entry price.")
+    p_add.add_argument("--exit-price", type=float, help="Exit price (closed trades).")
+    p_add.add_argument("--quantity", type=float, help="Position size / lots.")
+    p_add.add_argument("--stop-loss", type=float, help="Stop-loss price.")
+    p_add.add_argument("--take-profit", type=float, help="Take-profit price.")
+    p_add.add_argument("--risk", type=float, help="Initial risk amount (money).")
+    p_add.add_argument("--gross-pnl", type=float, help="Gross P&L.")
+    p_add.add_argument("--fees", type=float, help="Fees / commission.")
+    p_add.add_argument("--net-pnl", type=float, help="Net P&L (else derived from gross - fees).")
+    p_add.add_argument("--notes", help="Free-text notes.")
+    p_add.add_argument("--account-id", type=int, help="Target account id (default: local account).")
+    p_add.set_defaults(func=_cmd_add_trade)
+
     sub.add_parser("metrics", help="Print a metrics summary.").set_defaults(func=_cmd_metrics)
+
+    p_review = sub.add_parser(
+        "review-day", help="Show a day's summary and optionally add/update its daily review."
+    )
+    p_review.add_argument("date", help="The day to review, e.g. 2025-03-01.")
+    p_review.add_argument("--account-id", type=int, help="Account id (default: local account).")
+    p_review.add_argument("--notes", help="Daily review notes.")
+    p_review.add_argument("--mood", help="Mood label.")
+    p_review.add_argument("--discipline", type=int, help="Discipline score 0-100.")
+    p_review.add_argument("--risk", type=int, help="Risk score 0-100.")
+    p_review.add_argument("--execution", type=int, help="Execution score 0-100.")
+    p_review.add_argument("--lesson", help="Lesson learned.")
+    p_review.set_defaults(func=_cmd_review_day)
+
+    p_dq = sub.add_parser("data-quality", help="Print data-quality checks and Needs-Review queue.")
+    p_dq.add_argument("--account-id", type=int, help="Account id (default: all).")
+    p_dq.add_argument("--limit", type=int, default=20, help="Max needs-review rows to list.")
+    p_dq.set_defaults(func=_cmd_data_quality)
+
+    p_ecsv = sub.add_parser("export-csv", help="Export all tables to CSV files.")
+    p_ecsv.add_argument("--out", default="exports", help="Output directory (default: exports/).")
+    p_ecsv.set_defaults(func=_cmd_export_csv)
+
+    p_ejson = sub.add_parser("export-json", help="Export all tables to a single JSON file.")
+    p_ejson.add_argument("--out", default="exports", help="Output directory (default: exports/).")
+    p_ejson.set_defaults(func=_cmd_export_json)
+
+    p_backup = sub.add_parser("backup", help="Write a timestamped zip backup (DB + CSV + JSON).")
+    p_backup.add_argument("--out", default="backups", help="Output directory (default: backups/).")
+    p_backup.set_defaults(func=_cmd_backup)
+
+    p_restore = sub.add_parser(
+        "restore-backup", help="Restore the database from a backup zip (backs up current first)."
+    )
+    p_restore.add_argument("path", help="Path to the backup .zip file.")
+    p_restore.add_argument(
+        "--yes", action="store_true", help="Confirm overwriting the current database."
+    )
+    p_restore.set_defaults(func=_cmd_restore_backup)
+
     sub.add_parser("dashboard", help="Launch the Streamlit dashboard.").set_defaults(
         func=_cmd_dashboard
     )

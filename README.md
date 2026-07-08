@@ -10,6 +10,11 @@ sync (accounts, open positions, closed history, balance/equity). It **never**
 places, modifies, cancels, or closes orders/positions — see
 [Phase 2: read-only TradeLocker sync](#phase-2-read-only-tradelocker-sync).
 
+**Phase 3** (final v1) adds a review workflow, manual trade entry/correction that
+**survives resyncs**, daily reviews, stronger non-strategy risk analytics, a data
+quality / "Needs Review" queue, and local **backup / export / restore** — see
+[Phase 3: review, analytics, backup](#phase-3-review-analytics--data-portability).
+
 ---
 
 ## What Phase 1 includes
@@ -27,6 +32,21 @@ places, modifies, cancels, or closes orders/positions — see
   trades over ~9 weeks, plus 9 account snapshots).
 - A **CLI** (`trading-journal`) and a **Streamlit dashboard** (Plotly charts).
 - A **pytest** suite and **ruff** configuration.
+
+## What Phase 3 adds
+
+- **Trade review workflow** — per-trade `review_status` (UNREVIEWED / REVIEWED /
+  NEEDS_FIX), review notes, generic (non-strategy) mistake categories, and exit reason.
+- **Manual trade entry & correction** — add trades locally and edit any field, with
+  planned RR / realized R recomputed automatically. Corrections are **preserved
+  across TradeLocker resyncs** and conflicts are flagged.
+- **Daily reviews** — one generic reflection per day with discipline / risk /
+  execution self-scores (0–100) and a lesson field.
+- **Analytics** — non-strategy R & risk analytics (R distribution, streaks, trade
+  durations, risk consistency, R-derivation quality, weekday/symbol/side splits).
+- **Data quality / reconciliation** — a checks table plus a "Needs Review" queue.
+- **Backup / export / restore** — CSV + JSON exports and timestamped zip backups
+  with a conservative, validated restore.
 
 ## What is intentionally NOT included
 
@@ -114,15 +134,46 @@ trading-journal dashboard
 streamlit run src/trading_journal/ui/streamlit_app.py
 ```
 
-Tabs: **Dashboard** (KPIs, charts, Journal Score), **Trades** (filterable tables,
-open positions), **Import** (upload/seed), **Account** (balance/equity + manual
-snapshots), **Help / Data Quality** (formulas and missing-data checks).
+Tabs (8): **Dashboard** (KPIs, charts, Journal Score), **Trades** (filterable
+tables, trade detail/review panel, manual entry), **Analytics** (non-strategy R &
+risk analytics), **Calendar / Reviews** (heatmap, per-day detail, daily reviews),
+**Import** (upload/seed), **Sync** (read-only TradeLocker), **Account / Backup**
+(balance/equity, manual snapshots, export/backup/restore), and **Help / Data
+Quality** (checks, Needs-Review queue, formulas).
 
 ### Print metrics without the UI
 
 ```bash
 trading-journal metrics
 ```
+
+### Add / review / correct trades without the UI
+
+```bash
+# Add a manual trade (source=manual, is_manual=true; R/RR derived automatically):
+trading-journal add-trade --symbol EURUSD --side buy --status closed \
+  --opened-at "2025-03-01 09:00" --closed-at "2025-03-01 15:00" \
+  --entry-price 1.1000 --exit-price 1.1100 --stop-loss 1.0950 \
+  --gross-pnl 210 --fees 10
+
+# Show a day's summary and (optionally) save its daily review:
+trading-journal review-day 2025-03-01 --notes "Disciplined day" --discipline 85
+
+# Surface data-quality issues and the Needs-Review queue:
+trading-journal data-quality
+```
+
+### Back up and export your data
+
+```bash
+trading-journal export-csv --out exports/          # one CSV per table
+trading-journal export-json --out exports/          # single JSON file
+trading-journal backup --out backups/               # timestamped zip (DB+CSV+JSON+manifest)
+trading-journal restore-backup backups/xxx.zip --yes  # conservative restore
+```
+
+Restore **validates** the archive, **backs up your current database first** (a
+`.pre-restore-…` copy), and refuses to overwrite without `--yes`.
 
 ---
 
@@ -163,20 +214,23 @@ ways, and we **never** treat the estimate as equal to the exact figure:
    - BUY: `(exit − entry) / (entry − stop_loss)`
    - SELL: `(entry − exit) / (stop_loss − entry)`
 3. If neither is possible, `realized_r` is `None` and `r_method = "unknown"`.
+4. If you **manually override** R yourself, `r_method = "manual"`.
 
-The UI labels each trade's `r_method` so estimated R is always visible as such.
+The UI labels each trade's `r_method` so estimated / manual R is always visible as such.
 
 ### Journal Score (transparent, local — NOT the Zella Score)
 
-A 0–100 score that rewards good *journaling and risk habits*, not just profit:
+A 0–100 score that rewards good *journaling and risk habits*, not just profit
+(updated in Phase 3 to reward the review workflow):
 
 | Component | Max | Measures |
 | --- | --- | --- |
-| Data completeness | 30 | closed trades with all core fields (P&L, dates, side, symbol) |
-| Risk tracking | 25 | closed trades where R is knowable (money **or** price) |
+| Data completeness | 25 | closed trades with all core fields (P&L, dates, side, symbol) |
+| Risk tracking | 20 | closed trades where R is knowable (money **or** price) |
 | Risk control | 20 | losing trades that respected the stop (`realized_r ≥ −1.2`) |
 | Performance health | 15 | positive expectancy (R) and profit factor > 1 |
-| Review completeness | 10 | closed trades that have non-empty notes |
+| Trade review | 12 | closed trades reviewed (status set **or** notes written) |
+| Daily review consistency | 8 | trading days that have a daily review |
 
 Each component and the overall score carry a **confidence** (HIGH / MEDIUM / LOW)
 based on sample size. **LOW confidence means "not enough data yet", not "bad."** If
@@ -195,15 +249,24 @@ See `src/trading_journal/models.py`:
 - **AccountSnapshot** — `id, account_id, timestamp, balance, equity, source, created_at`.
 - **Trade** — the Phase 1 fields (`symbol, side, status, opened_at, closed_at?,
   entry_price, exit_price?, quantity?, stop_loss?, take_profit?, initial_risk_amount?,
-  gross_pnl?, fees?, net_pnl?, planned_rr?, realized_r?, r_method?, notes?`) plus
-  Phase 2 metadata `external_position_id?, external_order_id?, external_account_id?,
-  external_account_number?, external_status?, raw_payload_json?, last_synced_at?`.
+  gross_pnl?, fees?, net_pnl?, planned_rr?, realized_r?, r_method?, notes?`), Phase 2
+  metadata `external_position_id?, external_order_id?, external_account_id?,
+  external_account_number?, external_status?, raw_payload_json?, last_synced_at?`, and
+  Phase 3 review/manual metadata `review_status, reviewed_at?, review_notes?,
+  mistake_category?, exit_reason?, is_manual, has_manual_overrides,
+  manual_override_json?, data_quality_flags_json?`.
+- **DailyReview** — `id, account_id?, review_date, notes?, mood?, discipline_score?,
+  risk_score?, execution_score?, lesson?, created_at, updated_at`; unique per
+  `(account_id, review_date)`.
 - **SyncRun** — one row per sync attempt (status, counts, warnings/errors, summary).
 - **SyncState** — key/value cursors for incremental sync.
 
 New columns are added to existing SQLite databases automatically and
-non-destructively via additive `ALTER TABLE` on `init-db` — existing Phase 1
-databases upgrade in place.
+non-destructively via additive `ALTER TABLE` on `init-db`, and brand-new tables
+(e.g. `daily_reviews`) are created on `init-db` — existing Phase 1/2 databases
+upgrade in place. `manual_override_json` records which fields you have corrected so
+a resync can preserve them; `data_quality_flags_json` records reconciliation flags
+such as sync conflicts.
 
 `planned_rr`, `realized_r`, and `r_method` are derived on import / manual entry and
 computed in one place (`metrics.compute_planned_rr` / `compute_realized_r`).
@@ -213,18 +276,23 @@ computed in one place (`metrics.compute_planned_rr` / `compute_realized_r`).
 ```
 src/trading_journal/
   config.py          # env-driven settings
-  db.py              # engine, session_scope, init_db
-  models.py          # SQLAlchemy models + side/status normalization
-  metrics.py         # R/RR calculations + aggregate metrics engine
+  db.py              # engine, session_scope, init_db (additive migrations)
+  models.py          # SQLAlchemy models + normalization (side/status/review/mistake)
+  metrics.py         # R/RR calculations + aggregate metrics + per-day detail
+  analytics.py       # non-strategy risk & R analytics engine (Phase 3)
+  data_quality.py    # data-quality checks + Needs-Review queue (Phase 3)
   journal_score.py   # the transparent Journal Score rubric
   formatting.py      # shared money/R/% display helpers (CLI + UI)
   seed.py            # idempotent demo-data seeding
-  cli.py             # `trading-journal` entry point (+ tradelocker-* commands)
+  cli.py             # `trading-journal` entry point (all commands)
   importers/csv_importer.py
   connectors/        # read-only broker connectors
     tradelocker/     # client, endpoints, schemas, config_parser, mapper, errors
-  services/          # trade_service, account_service, sync_service, sync_state_service
-  ui/                # streamlit_app.py (+ Sync tab), charts.py
+  services/          # trade_service (entry/edit/review), account_service,
+                     # review_service (daily reviews), backup_service,
+                     # sync_service, sync_state_service
+  ui/                # streamlit_app.py + common.py, charts.py, and per-tab views:
+                     # trades_view, analytics_view, reviews_view, backup_view
 ```
 
 > **Structure notes:** the requested layout was followed, with a few small,
@@ -238,7 +306,7 @@ src/trading_journal/
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 93 tests (Phase 1 + Phase 2)
+pytest          # 156 tests (Phase 1 + Phase 2 + Phase 3)
 ruff check src tests
 ruff format src tests
 ```
@@ -383,3 +451,91 @@ calculators, so your KPIs and Journal Score "just work".
 | No accounts found | Credentials are valid but for a different environment, or the login has no accounts. |
 | No closed trades imported | Nothing closed within the lookback window — widen it with `--lookback-days`. |
 | `429` rate limited | You're syncing too often; wait and retry. |
+
+---
+
+## Phase 3: review, analytics & data portability
+
+Phase 3 turns the journal from a read-only dashboard into a working review tool,
+while keeping the same local-first, read-only-broker guarantees.
+
+### Manual trade entry & editing
+
+- **Add a trade** locally from the **Trades** tab ("➕ Add a manual trade") or the
+  CLI (`add-trade`). Manual trades get `source = "manual"` and `is_manual = true`;
+  `net_pnl`, `planned_rr`, and `realized_r` are derived automatically.
+- **Edit / correct** any trade from the Trades tab's **detail & review** panel:
+  symbol, side, status, times, prices, quantity, stop/target, risk, P&L, notes,
+  review notes, mistake category, exit reason, and review status. `planned_rr` /
+  `realized_r` are recomputed unless you tick **Override** (then `r_method = "manual"`).
+- Every change is recorded in `manual_override_json` (old + new value), and any
+  edited **data** field is "locked".
+
+### Corrections survive TradeLocker resyncs
+
+When a resync updates a trade, it **never** overwrites:
+
+- your `notes`, `review_notes`, `review_status`, `mistake_category`, or `exit_reason`;
+- any field you manually corrected (a "locked" field).
+
+If TradeLocker later reports a value that **conflicts** with one of your manual
+corrections, the local value is **kept** and the conflict is recorded both as a
+sync warning and as a `sync_conflict` entry in the trade's `data_quality_flags_json`
+(surfaced in the Needs-Review queue). Tests assert this end-to-end.
+
+### Daily reviews
+
+On **Calendar / Reviews** (or via `review-day`), pick a day to see its net P&L,
+realized R, win/loss/breakeven counts, average R, best/worst trade, and the trades
+active that day — then write a **daily review**: notes, discipline / risk /
+execution self-scores (0–100), mood, and a lesson. One review per account per day.
+
+### Analytics (non-strategy)
+
+The **Analytics** tab shows generic R & risk analytics only (no setup/strategy
+breakdowns): total / average / median / std-dev realized R, cumulative R curve,
+best/worst R, planned-RR distribution, win/loss streaks (max consecutive
+wins/losses + current streak), average trade / winner / loser durations, largest
+winning/losing day, **risk consistency** (avg/median/min/max risk + coefficient of
+variation), **R-derivation quality** (% money / price / manual / unknown), and
+simple weekday / symbol / side splits.
+
+### Data quality & the Needs-Review queue
+
+The **Help / Data Quality** tab (and `data-quality`) lists missing P&L, missing
+times, missing stops/risk, invalid planned RR, unknown/estimated R, stale open
+positions, sync conflicts, duplicate-like trades, and Needs-Fix trades. The
+**Needs Review** queue collects every trade that needs attention, annotated with
+the reason(s), so you can fix data on the Trades tab and mark it reviewed.
+
+### Backup, export & restore
+
+Everything stays on your machine (see the CLI/UI commands above). A **backup** zip
+bundles a copy of the SQLite database, per-table CSVs, a JSON export, and a
+`manifest.json`. **Restore** validates the archive, snapshots your current database
+first (`.pre-restore-…`), and refuses to overwrite without explicit confirmation.
+Exports/backups are git-ignored.
+
+### Recommended daily workflow
+
+1. `trading-journal sync-tradelocker --account-id <id> --dry-run` (preview).
+2. `trading-journal sync-tradelocker --account-id <id> --apply` (import).
+3. Review the **Needs Review** queue (Help / Data Quality tab).
+4. Correct trade data where needed (Trades tab detail panel) and **Mark reviewed**.
+5. Add a **daily review** (Calendar / Reviews tab).
+6. Check **Dashboard** and **Analytics**.
+7. **Back up** weekly (`trading-journal backup --out backups/`).
+
+### Known limitations (Phase 3)
+
+- **No MFE/MAE (max favorable/adverse excursion).** This requires intraday candle
+  data, which this repo does not store. It is intentionally **not** faked; it is a
+  documented future add-on that would need a price-history source.
+- **R can be money-based, price-estimated, manual, or unknown** — the method is
+  always shown and never conflated.
+- **No strategy-specific analytics** (by design — all trades assumed one strategy).
+- **No cloud sync, no real-time/websocket sync, no mobile app, no multi-user/auth.**
+- Trade attachments (screenshots) are **not** implemented in v1 — a possible future
+  `TradeAttachment` (trade_id, file_path, kind, note) was scoped out to keep v1 lean.
+- TradeLocker response shapes vary and partial closes may still need manual review
+  (see Phase 2 limitations above).

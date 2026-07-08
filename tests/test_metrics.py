@@ -236,13 +236,32 @@ def test_journal_score_components_full():
     ]
     score = compute_journal_score(winners + losers)
 
-    assert _component(score, "completeness").points == pytest.approx(30.0)
-    assert _component(score, "risk_tracking").points == pytest.approx(25.0)
+    # Phase 3 rubric: 25 / 20 / 20 / 15 / 12 / 8 = 100.
+    assert _component(score, "completeness").points == pytest.approx(25.0)
+    assert _component(score, "risk_tracking").points == pytest.approx(20.0)
     assert _component(score, "risk_control").points == pytest.approx(20.0)
     assert _component(score, "performance").points == pytest.approx(15.0)
-    assert _component(score, "review").points == pytest.approx(5.0)  # 5 of 10 have notes
-    assert score.score == pytest.approx(95.0)
+    # 5 of 10 closed trades have notes (counted as reviewed) -> half of 12.
+    assert _component(score, "trade_review").points == pytest.approx(6.0)
+    # No daily reviews supplied -> 0 of the trading days covered.
+    assert _component(score, "daily_review").points == pytest.approx(0.0)
+    assert score.score == pytest.approx(86.0)
     assert score.confidence == CONFIDENCE_MEDIUM  # 10 closed trades
+
+
+def test_journal_score_daily_review_component_rewards_coverage():
+    import pandas as pd
+
+    # Two closed trades on two distinct days; one day has a daily review.
+    trades = [
+        make_trade(net_pnl=100.0, closed_at=datetime(2025, 1, 1, 12)),
+        make_trade(net_pnl=-50.0, closed_at=datetime(2025, 1, 2, 12)),
+    ]
+    reviews = pd.DataFrame({"review_date": [datetime(2025, 1, 1)]})
+    score = compute_journal_score(trades, daily_reviews=reviews)
+    daily = _component(score, "daily_review")
+    # 1 of 2 trading days covered -> half of 8.
+    assert daily.points == pytest.approx(4.0)
 
 
 def test_journal_score_risk_control_low_confidence_without_losers():

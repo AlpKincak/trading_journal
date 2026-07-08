@@ -85,6 +85,61 @@ def realized_r_hist(trades: pd.DataFrame) -> go.Figure | None:
     return _style(fig)
 
 
+def cumulative_r_line(cumulative_r: pd.DataFrame) -> go.Figure | None:
+    """Line/area chart of cumulative realized R over trading days."""
+    if cumulative_r is None or cumulative_r.empty:
+        return None
+    fig = go.Figure(
+        go.Scatter(
+            x=cumulative_r["date"],
+            y=cumulative_r["cumulative_realized_r"],
+            mode="lines",
+            line=dict(color=PROFIT_COLOR, width=2),
+            fill="tozeroy",
+            fillcolor="rgba(38,166,154,0.15)",
+            hovertemplate="%{x|%Y-%m-%d}<br>Cumulative: %{y:.2f}R<extra></extra>",
+        )
+    )
+    fig.update_layout(title="Cumulative realized R")
+    return _style(fig)
+
+
+def planned_rr_hist(values: pd.Series | None) -> go.Figure | None:
+    """Histogram of planned reward-to-risk across trades."""
+    if values is None:
+        return None
+    clean = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if clean.empty:
+        return None
+    fig = go.Figure(
+        go.Histogram(
+            x=clean,
+            nbinsx=max(6, min(24, int(clean.nunique()))),
+            marker_color=ACCENT_COLOR,
+            hovertemplate="RR in [%{x}]<br>count: %{y}<extra></extra>",
+        )
+    )
+    fig.update_layout(title="Planned RR distribution", bargap=0.05)
+    return _style(fig)
+
+
+def weekday_bar(weekday: pd.DataFrame) -> go.Figure | None:
+    """Bar chart of net P&L by weekday (green up / red down)."""
+    if weekday is None or weekday.empty or "net_pnl" not in weekday.columns:
+        return None
+    colors = [PROFIT_COLOR if v >= 0 else LOSS_COLOR for v in weekday["net_pnl"]]
+    fig = go.Figure(
+        go.Bar(
+            x=weekday["weekday"],
+            y=weekday["net_pnl"],
+            marker_color=colors,
+            hovertemplate="%{x}<br>Net P&L: %{y:$,.2f}<extra></extra>",
+        )
+    )
+    fig.update_layout(title="Performance by weekday")
+    return _style(fig)
+
+
 def calendar_heatmap(daily: pd.DataFrame) -> go.Figure | None:
     """GitHub-style calendar heatmap of daily net P&L (weekday x week)."""
     if daily is None or daily.empty:

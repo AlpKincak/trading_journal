@@ -6,11 +6,13 @@ just profitability. Every component and its formula is shown to the user.
 
 Rubric (max points)
 --------------------
-* Data completeness  (30) - closed trades with the core fields filled in.
-* Risk tracking      (25) - closed trades where R is knowable (money or price).
-* Risk control       (20) - losing trades that respected the stop (R >= -1.2).
-* Performance health  (15) - positive expectancy in R and profit factor > 1.
-* Review completeness (10) - closed trades that have written notes.
+* Data completeness   (25) - closed trades with the core fields filled in.
+* Risk tracking       (20) - closed trades where R is knowable (money or price).
+* Risk control        (20) - losing trades that respected the stop (R >= -1.2).
+* Performance health   (15) - positive expectancy in R and profit factor > 1.
+* Trade review        (12) - closed trades that have been reviewed (status set or
+                             notes written).
+* Daily review consistency (8) - trading days that have a daily review.
 
 Each component also reports a confidence (HIGH/MEDIUM/LOW) based on sample size,
 and the overall score carries an overall confidence label. Low confidence means
@@ -31,14 +33,15 @@ from .metrics import (
     _to_float,
     compute_metrics,
 )
-from .models import TradeStatus
+from .models import ReviewStatus, TradeStatus
 
-# Component maximum points.
-MAX_COMPLETENESS = 30.0
-MAX_RISK_TRACKING = 25.0
+# Component maximum points (sum to 100).
+MAX_COMPLETENESS = 25.0
+MAX_RISK_TRACKING = 20.0
 MAX_RISK_CONTROL = 20.0
 MAX_PERFORMANCE = 15.0
-MAX_REVIEW = 10.0
+MAX_TRADE_REVIEW = 12.0
+MAX_DAILY_REVIEW = 8.0
 
 CONFIDENCE_HIGH = "HIGH"
 CONFIDENCE_MEDIUM = "MEDIUM"
@@ -249,26 +252,74 @@ def _performance_component(metrics: TradeMetrics) -> ScoreComponent:
     )
 
 
-def _review_component(closed: pd.DataFrame) -> ScoreComponent:
+def _trade_review_component(closed: pd.DataFrame) -> ScoreComponent:
     n = len(closed)
     if n == 0:
         return ScoreComponent(
-            "review",
-            "Review completeness",
+            "trade_review",
+            "Trade review",
             0.0,
-            MAX_REVIEW,
+            MAX_TRADE_REVIEW,
             "No closed trades yet.",
             CONFIDENCE_LOW,
         )
-    has_notes = _nonempty_string_mask(closed["notes"])
-    frac = has_notes.mean()
+    status = closed["review_status"].astype("string").str.upper()
+    status_set = status.isin([ReviewStatus.REVIEWED.value, ReviewStatus.NEEDS_FIX.value])
+    reviewed = (
+        status_set
+        | _nonempty_string_mask(closed["notes"])
+        | _nonempty_string_mask(closed["review_notes"])
+    )
+    frac = reviewed.mean()
     return ScoreComponent(
-        "review",
-        "Review completeness",
-        MAX_REVIEW * frac,
-        MAX_REVIEW,
-        f"{int(has_notes.sum())}/{n} closed trades have notes.",
+        "trade_review",
+        "Trade review",
+        MAX_TRADE_REVIEW * frac,
+        MAX_TRADE_REVIEW,
+        f"{int(reviewed.sum())}/{n} closed trades reviewed (status set or notes written).",
         _sample_confidence(n),
+    )
+
+
+def _trading_days(closed: pd.DataFrame) -> set:
+    """Set of calendar dates on which trades were closed (realized)."""
+    if closed.empty:
+        return set()
+    closed_at = pd.to_datetime(closed["closed_at"], errors="coerce").dropna()
+    return set(closed_at.dt.normalize().dt.date)
+
+
+def _review_dates(daily_reviews: pd.DataFrame | None) -> set:
+    if daily_reviews is None or daily_reviews.empty or "review_date" not in daily_reviews.columns:
+        return set()
+    dates = pd.to_datetime(daily_reviews["review_date"], errors="coerce").dropna()
+    return set(dates.dt.normalize().dt.date)
+
+
+def _daily_review_component(
+    closed: pd.DataFrame, daily_reviews: pd.DataFrame | None
+) -> ScoreComponent:
+    trading_days = _trading_days(closed)
+    if not trading_days:
+        return ScoreComponent(
+            "daily_review",
+            "Daily review consistency",
+            0.0,
+            MAX_DAILY_REVIEW,
+            "No trading days yet.",
+            CONFIDENCE_LOW,
+        )
+    covered = trading_days & _review_dates(daily_reviews)
+    frac = len(covered) / len(trading_days)
+    n_days = len(trading_days)
+    confidence = _sample_confidence(n_days) if n_days >= 8 else CONFIDENCE_LOW
+    return ScoreComponent(
+        "daily_review",
+        "Daily review consistency",
+        MAX_DAILY_REVIEW * frac,
+        MAX_DAILY_REVIEW,
+        f"{len(covered)}/{n_days} trading days have a daily review.",
+        confidence,
     )
 
 
@@ -287,8 +338,14 @@ def _overall_confidence(closed: pd.DataFrame, completeness: ScoreComponent) -> s
 def compute_journal_score(
     trades: pd.DataFrame | Any,
     metrics: TradeMetrics | None = None,
+    daily_reviews: pd.DataFrame | None = None,
 ) -> JournalScore:
-    """Compute the Journal Score and its component breakdown."""
+    """Compute the Journal Score and its component breakdown.
+
+    ``daily_reviews`` is an optional DataFrame with a ``review_date`` column used
+    for the daily-review-consistency component; when omitted that component scores
+    the trading days as un-reviewed (LOW confidence).
+    """
     df = _ensure_dataframe(trades)
     if metrics is None:
         metrics = compute_metrics(df)
@@ -302,7 +359,8 @@ def compute_journal_score(
         _risk_tracking_component(closed),
         _risk_control_component(closed),
         _performance_component(metrics),
-        _review_component(closed),
+        _trade_review_component(closed),
+        _daily_review_component(closed, daily_reviews),
     ]
 
     raw = sum(c.points for c in components)

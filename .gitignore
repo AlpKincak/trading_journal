@@ -25,6 +25,10 @@ ENV/
 data/*.db
 data/*.sqlite3
 
+# Local exports & backups (Phase 3 data portability — never commit user data)
+exports/
+backups/
+
 # Test / tooling caches
 .pytest_cache/
 .ruff_cache/
@@ -41,5 +45,3 @@ htmlcov/
 .idea/
 .vscode/
 
-# Knowledge graph output (regenerated locally)
-graphify-out/

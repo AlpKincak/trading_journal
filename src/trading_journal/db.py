@@ -12,10 +12,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
 
-# Columns added in Phase 2. ``create_all`` builds these on fresh databases, but it
-# does NOT alter pre-existing tables, so we additively ``ALTER TABLE ADD COLUMN``
-# any that are missing. All are nullable or defaulted, so the change is safe and
-# non-destructive on an existing SQLite database.
+# Columns added after Phase 1 (Phase 2 sync metadata + Phase 3 review/manual
+# metadata). ``create_all`` builds these on fresh databases and creates any brand
+# new tables (e.g. ``daily_reviews``), but it does NOT alter pre-existing tables,
+# so we additively ``ALTER TABLE ADD COLUMN`` any that are missing. All are
+# nullable or defaulted, so the change is safe and non-destructive on an existing
+# SQLite database.
 _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "accounts": [
         ("source", "VARCHAR(40) NOT NULL DEFAULT 'local'"),
@@ -32,6 +34,16 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("external_status", "VARCHAR(30)"),
         ("raw_payload_json", "TEXT"),
         ("last_synced_at", "DATETIME"),
+        # Phase 3 review workflow + manual-correction metadata.
+        ("review_status", "VARCHAR(12) NOT NULL DEFAULT 'UNREVIEWED'"),
+        ("reviewed_at", "DATETIME"),
+        ("review_notes", "TEXT"),
+        ("mistake_category", "VARCHAR(20)"),
+        ("exit_reason", "VARCHAR(120)"),
+        ("is_manual", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("has_manual_overrides", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("manual_override_json", "TEXT"),
+        ("data_quality_flags_json", "TEXT"),
     ],
 }
 

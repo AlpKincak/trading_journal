@@ -211,6 +211,99 @@ def test_missing_credentials_propagate_as_config_error(session):
         service.sync_account(session, "12345", "1", dry_run=False)
 
 
+def test_manual_correction_survives_resync_and_conflict_is_flagged(session):
+    from trading_journal.services.trade_service import (
+        TradeEditInput,
+        apply_manual_correction,
+        load_data_quality_flags,
+        manual_locked_fields,
+    )
+
+    # Start from an open position (no closed history yet).
+    service_open, _ = _service(fakes.default_routes(history={"d": {"ordersHistory": []}}))
+    service_open.sync_account(session, "12345", "1", dry_run=False)
+    session.commit()
+
+    trade = session.query(Trade).one()
+    # User widens the stop and reviews the trade.
+    apply_manual_correction(
+        session,
+        trade,
+        TradeEditInput(
+            stop_loss=1.080,
+            review_status="REVIEWED",
+            review_notes="widened stop after news",
+            mistake_category="MOVED_STOP",
+            notes="keep this note",
+        ),
+    )
+    session.commit()
+    assert "stop_loss" in manual_locked_fields(trade)
+
+    # Resync: the broker still reports the original stop (1.095) -> conflict.
+    service_again, _ = _service(fakes.default_routes(history={"d": {"ordersHistory": []}}))
+    result = service_again.sync_account(session, "12345", "1", dry_run=False)
+    session.commit()
+
+    trade = session.query(Trade).one()
+    assert trade.stop_loss == pytest.approx(1.080)  # manual value kept
+    assert trade.review_status == "REVIEWED"  # review fields untouched
+    assert trade.review_notes == "widened stop after news"
+    assert trade.mistake_category == "MOVED_STOP"
+    assert trade.notes == "keep this note"
+
+    flags = load_data_quality_flags(trade)
+    assert "sync_conflict" in flags
+    assert "stop_loss" in flags["sync_conflict"]["detail"]
+    assert any("manual corrections" in w for w in result.warnings)
+
+
+def test_review_fields_survive_resync_without_locking_data(session):
+    from trading_journal.services.trade_service import mark_needs_fix
+
+    service_open, _ = _service(fakes.default_routes(history={"d": {"ordersHistory": []}}))
+    service_open.sync_account(session, "12345", "1", dry_run=False)
+    session.commit()
+
+    trade = session.query(Trade).one()
+    mark_needs_fix(session, trade)
+    session.commit()
+    assert not trade.has_manual_overrides  # a pure review change locks no data fields
+
+    # Closed history arrives; the trade converts but the review status persists.
+    service_closed, _ = _service(fakes.default_routes(positions={"d": {"positions": []}}))
+    service_closed.sync_account(session, "12345", "1", dry_run=False)
+    session.commit()
+
+    trade = session.query(Trade).one()
+    assert trade.status == TradeStatus.CLOSED.value
+    assert trade.review_status == "NEEDS_FIX"
+
+
+def test_manual_override_of_net_pnl_is_not_recomputed_on_resync(session):
+    from trading_journal.services.trade_service import (
+        TradeEditInput,
+        apply_manual_correction,
+        manual_locked_fields,
+    )
+
+    service, _ = _service()  # full happy path -> a closed trade
+    service.sync_account(session, "12345", "1", dry_run=False)
+    session.commit()
+
+    trade = session.query(Trade).one()
+    apply_manual_correction(session, trade, TradeEditInput(net_pnl=123.45))
+    session.commit()
+    assert "net_pnl" in manual_locked_fields(trade)
+
+    # Resync must not clobber the manually corrected net P&L.
+    service2, _ = _service()
+    service2.sync_account(session, "12345", "1", dry_run=False)
+    session.commit()
+    trade = session.query(Trade).one()
+    assert trade.net_pnl == pytest.approx(123.45)
+
+
 def test_local_accounts_are_not_touched_by_sync(session):
     from trading_journal.services.account_service import get_or_create_default_account
 

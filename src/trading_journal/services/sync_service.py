@@ -11,9 +11,14 @@ Guarantees:
 * **Dry-run safe** — in dry-run mode it performs zero mutations (it computes the
   would-be counts by inspecting existing rows without changing them), so wrapping
   it in a committing ``session_scope`` is harmless.
-* **Non-destructive** — user ``notes`` are never overwritten; a manually-entered
-  ``initial_risk_amount`` is only filled when locally empty; disappeared open
-  positions are flagged, never deleted.
+* **Non-destructive** — user ``notes``, review fields, and any manually-corrected
+  trade field are never overwritten; a manually-entered ``initial_risk_amount`` is
+  only filled when locally empty; disappeared open positions are flagged, never
+  deleted.
+* **Manual corrections win** — fields the user has manually edited are "locked"
+  (see :func:`trade_service.manual_locked_fields`); a resync keeps the local value
+  and records a conflict warning + a ``sync_conflict`` data-quality flag when the
+  incoming TradeLocker value differs.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from ..connectors.tradelocker.schemas import TradeLockerAccount, TradeLockerConf
 from ..models import Account, AccountSnapshot, SyncStatus, Trade, TradeStatus
 from . import sync_state_service
 from .account_service import add_snapshot
-from .trade_service import recalculate_derived
+from .trade_service import add_data_quality_flag, manual_locked_fields, recalculate_derived
 
 SOURCE = mapper.SOURCE
 
@@ -506,7 +511,8 @@ class TradeLockerSyncService:
                 result.trades_imported += 1
                 return
             trade = Trade(account_id=local_account_id, source=SOURCE, external_id=cand.dedup_key)
-            self._apply_trade_values(trade, self._trade_target_values(cand, None))
+            values, _ = self._trade_target_values(cand, None)
+            self._apply_trade_values(trade, values)
             trade.last_synced_at = datetime.now()
             recalculate_derived(trade)
             self._post_derive_fixups(trade, cand)
@@ -515,17 +521,20 @@ class TradeLockerSyncService:
             result.trades_imported += 1
             return
 
-        target = self._trade_target_values(cand, existing.initial_risk_amount)
-        changed = any(getattr(existing, attr) != value for attr, value in target.items())
+        locked = manual_locked_fields(existing)
+        values, conflicts = self._trade_target_values(cand, existing)
+        changed = any(getattr(existing, attr) != value for attr, value in values.items())
         if dry_run:
             result.trades_updated += 1 if changed else 0
             result.trades_skipped += 0 if changed else 1
+            self._warn_conflicts(existing, conflicts, result)
             return
 
         existing.last_synced_at = datetime.now()
+        self._record_conflicts(existing, conflicts, result)
         if changed:
-            self._apply_trade_values(existing, target)
-            recalculate_derived(existing)
+            self._apply_trade_values(existing, values)
+            recalculate_derived(existing, locked=locked)
             self._post_derive_fixups(existing, cand)
             session.flush()
             result.trades_updated += 1
@@ -533,14 +542,51 @@ class TradeLockerSyncService:
             result.trades_skipped += 1
 
     def _trade_target_values(
-        self, cand: MappedTrade, existing_initial_risk: float | None
-    ) -> dict[str, Any]:
-        values: dict[str, Any] = {attr: getattr(cand, attr) for attr in _TRADE_VALUE_FIELDS}
-        # Only fill initial_risk_amount when the broker provides one and the local
-        # value is empty — never clobber a manually-entered risk figure.
-        if cand.initial_risk_amount is not None and existing_initial_risk is None:
+        self, cand: MappedTrade, existing: Trade | None
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Build the set of values to apply plus any manual-override conflicts.
+
+        Manually-locked fields are preserved (kept out of the returned values); if
+        the incoming TradeLocker value differs from the locked local value it is
+        recorded as a conflict rather than applied.
+        """
+        locked = manual_locked_fields(existing) if existing is not None else set()
+        values: dict[str, Any] = {}
+        conflicts: list[str] = []
+
+        for attr in _TRADE_VALUE_FIELDS:
+            incoming = getattr(cand, attr)
+            if existing is not None and attr in locked:
+                current = getattr(existing, attr)
+                if incoming is not None and incoming != current:
+                    conflicts.append(attr)
+                continue  # keep the manually-corrected local value
+            values[attr] = incoming
+
+        # initial_risk_amount: never clobber a manually-entered/locked risk figure.
+        existing_ira = existing.initial_risk_amount if existing is not None else None
+        if "initial_risk_amount" in locked:
+            if cand.initial_risk_amount is not None and cand.initial_risk_amount != existing_ira:
+                conflicts.append("initial_risk_amount")
+        elif cand.initial_risk_amount is not None and existing_ira is None:
             values["initial_risk_amount"] = cand.initial_risk_amount
-        return values
+
+        return values, conflicts
+
+    @staticmethod
+    def _warn_conflicts(existing: Trade, conflicts: list[str], result: SyncResult) -> None:
+        if not conflicts:
+            return
+        result.warnings.append(
+            f"trade {existing.external_id}: TradeLocker values differ from your manual "
+            f"corrections on {', '.join(sorted(conflicts))}; kept your values."
+        )
+
+    def _record_conflicts(self, existing: Trade, conflicts: list[str], result: SyncResult) -> None:
+        if not conflicts:
+            return
+        self._warn_conflicts(existing, conflicts, result)
+        add_data_quality_flag(existing, "sync_conflict", sorted(conflicts))
 
     @staticmethod
     def _apply_trade_values(trade: Trade, values: dict[str, Any]) -> None:
