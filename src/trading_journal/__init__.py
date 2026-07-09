@@ -1,8 +1,8 @@
-"""trading_journal: a local, TradeZella-lite forex trading journal.
+"""trading_journal: a local-first forex trading journal.
 
-Phase 1: local journal + dashboard. Phase 2: read-only TradeLocker sync.
-Phase 3: review workflow, manual correction, daily reviews, analytics,
-data-quality/reconciliation, and local backup/export/restore.
+Includes a Streamlit dashboard, CLI tools, CSV import, manual review and
+correction workflows, data-quality checks, backup/export/restore, and optional
+read-only TradeLocker sync.
 """
 
 from __future__ import annotations

@@ -354,7 +354,7 @@ def _cmd_dashboard(_: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: read-only TradeLocker sync commands
+# Read-only TradeLocker sync commands
 # ---------------------------------------------------------------------------
 def _cmd_tradelocker_health(_: argparse.Namespace) -> int:
     settings = get_tradelocker_settings()
@@ -496,7 +496,10 @@ def _cmd_sync_status(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trading-journal",
-        description="A local, TradeZella-lite forex trading journal (Phase 1 + read-only sync).",
+        description=(
+            "A local-first forex trading journal with CSV import and read-only "
+            "TradeLocker sync."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"trading-journal {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -572,7 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
         func=_cmd_dashboard
     )
 
-    # --- Phase 2: read-only TradeLocker sync ---
+    # --- Read-only TradeLocker sync ---
     sub.add_parser(
         "tradelocker-health", help="Check TradeLocker config/auth (read-only, no secrets printed)."
     ).set_defaults(func=_cmd_tradelocker_health)
