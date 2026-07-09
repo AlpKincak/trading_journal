@@ -36,6 +36,9 @@ backups/
 .coverage
 htmlcov/
 
+# Generated codebase graph / analysis artifacts
+graphify-out/
+
 # Streamlit
 .streamlit/secrets.toml
 
@@ -44,4 +47,3 @@ htmlcov/
 *.swp
 .idea/
 .vscode/
-
