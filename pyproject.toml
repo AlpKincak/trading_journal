@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trading_journal"
 version = "0.3.0"
-description = "A local, TradeZella-lite forex trading journal with read-only TradeLocker sync."
+description = "A local-first forex trading journal with analytics, review workflows, and optional read-only TradeLocker sync."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "trading_journal" }]
+authors = [{ name = "Alp Murat Kincak" }]
 keywords = ["forex", "trading", "journal", "dashboard", "streamlit", "tradelocker"]
 
 dependencies = [
@@ -27,6 +27,9 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.5",
 ]
+
+[project.urls]
+Repository = "https://github.com/AlpKincak/trading_journal"
 
 [project.scripts]
 trading-journal = "trading_journal.cli:main"
