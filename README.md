@@ -22,9 +22,36 @@ history, and data quality in Streamlit or through the CLI.
 This is an analysis and recordkeeping tool: **it never places, modifies, cancels,
 or closes trades.**
 
-<!-- Once the screenshot files are uploaded to assets/screenshots/, insert the
-     gallery provided in the accompanying GALLERY.md immediately here.
-     The images are deliberately not linked until the files exist in this repository. -->
+## Preview
+
+The dashboard brings together P&L, R-multiple analysis, the Journal Score, and data-quality checks. Screenshots below use bundled demo data, not live trading results.
+
+<p align="center">
+  <img src="assets/screenshots/dashboard.webp" alt="Trading Journal dashboard with risk metrics, performance charts, journal scoring, and a daily P&L calendar" width="100%">
+</p>
+
+<details>
+<summary><strong>More screenshots — Trades, Analytics, and Account / Backup</strong></summary>
+
+### Trades
+
+Filter and review open and closed trades, including imported fields, position details, and journal notes.
+
+<img src="assets/screenshots/trades.webp" alt="Trading Journal Trades tab showing filters, recent trades, open positions, and closed trade records" width="100%">
+
+### Analytics
+
+Explore realized R, risk consistency, distribution charts, and performance breakdowns.
+
+<img src="assets/screenshots/analytics.webp" alt="Trading Journal Analytics tab showing risk and R-multiple statistics, distributions, and performance charts" width="100%">
+
+### Account / Backup
+
+Review account snapshots and export or back up your local trading data.
+
+<img src="assets/screenshots/account-backup.webp" alt="Trading Journal Account and Backup tab showing equity snapshots, account history, and local export controls" width="100%">
+
+</details>
 
 **Jump to:** [Quick start](#quick-start) · [Features](#features) ·
 [Dashboard views](#dashboard-views) · [CLI](#cli-commands) ·
