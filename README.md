@@ -1,7 +1,7 @@
 <h1 align="center">Trading Journal</h1>
 
 <p align="center">
-  <strong>A local-first forex trading journal with a Streamlit dashboard, CLI tools, CSV import, and optional read-only TradeLocker sync.</strong>
+  <strong>A local-first forex trading journal for review, risk analysis, and better trading records.</strong>
 </p>
 
 <p align="center">
@@ -10,58 +10,26 @@
   <img alt="SQLite" src="https://img.shields.io/badge/Database-SQLite-003B57?logo=sqlite&logoColor=white">
   <img alt="TradeLocker read-only" src="https://img.shields.io/badge/TradeLocker-read--only-2E7D32">
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-blue">
+  <a href="https://github.com/AlpKincak/trading_journal/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AlpKincak/trading_journal/actions/workflows/ci.yml/badge.svg"></a>
 </p>
 
-Trading Journal is a small, single-user desktop-style app for reviewing forex
-trades on your own machine. Import a CSV, seed the bundled demo data, or sync
-TradeLocker data in read-only mode, then review performance, risk, data quality,
-and journaling consistency without sending your trading records to a cloud service.
+Trading Journal is a single-user, desktop-style application for analyzing forex
+trades on your own machine. Import a CSV, try the bundled demo data, or connect
+TradeLocker in read-only mode. Explore performance, risk, trade reviews, account
+history, and data quality in Streamlit or through the CLI.
 
-This is analysis software, not trading software. It never places, modifies,
-cancels, or closes orders.
+**Local by default.** Your journal lives in SQLite, with local exports and backups.
+This is an analysis and recordkeeping tool: **it never places, modifies, cancels,
+or closes trades.**
 
-## Contents
+<!-- Once the screenshot files are uploaded to assets/screenshots/, insert the
+     gallery provided in the accompanying GALLERY.md immediately here.
+     The images are deliberately not linked until the files exist in this repository. -->
 
-- [What It Does](#what-it-does)
-- [Current Scope](#current-scope)
-- [Quick Start](#quick-start)
-- [Dashboard](#dashboard)
-- [CLI Commands](#cli-commands)
-- [CSV Import](#csv-import)
-- [TradeLocker Sync](#tradelocker-sync)
-- [Metrics And Scoring](#metrics-and-scoring)
-- [Data Storage And Privacy](#data-storage-and-privacy)
-- [Project Layout](#project-layout)
-- [Development](#development)
-- [Limitations](#limitations)
-- [License](#license)
-
-## What It Does
-
-| Area | Included |
-| --- | --- |
-| Dashboard | Streamlit app with KPIs, Plotly charts, trade tables, analytics, calendar reviews, import, sync, backup, and data-quality tabs. |
-| Trade import | Flexible CSV importer with common column aliases, messy-number parsing, validation errors, warnings, and duplicate prevention. |
-| Manual journaling | Add trades manually, edit/correct imported trades, record notes, review status, mistake category, exit reason, and daily reflections. |
-| Risk analytics | Net P&L, win rate, day win rate, profit factor, expectancy, R multiples, planned RR, streaks, duration, drawdown, risk consistency, and split views. |
-| Journal Score | Transparent local 0-100 score for data completeness, risk tracking, risk control, performance health, trade review, and daily-review consistency. |
-| Broker sync | Optional read-only TradeLocker connector for accounts, open positions, closed history, and balance/equity snapshots. |
-| Data portability | CSV export, JSON export, timestamped zip backups, and conservative restore that backs up the current DB first. |
-| CLI | `trading-journal` command for setup, import, metrics, manual trades, reviews, data quality, sync, backup, export, and restore. |
-
-## Current Scope
-
-This repo is intentionally small and complete for its current purpose:
-
-- Local, single-user SQLite app.
-- Forex-focused trade journaling and review.
-- CSV import plus optional TradeLocker read-only sync.
-- No live trading or broker-side write actions.
-- No cloud backend, authentication system, subscriptions, teams, or mobile app.
-- No MT4, MT5, cTrader, or other broker connectors today.
-
-Additional broker support could be added later, but the public promise of this
-project is currently limited to CSV import and TradeLocker read-only sync.
+**Jump to:** [Quick start](#quick-start) · [Features](#features) ·
+[Dashboard views](#dashboard-views) · [CLI](#cli-commands) ·
+[TradeLocker sync](#tradelocker-sync) · [Metrics](#metrics-and-scoring) ·
+[Privacy](#data-storage-and-privacy) · [Development](#development)
 
 ## Quick Start
 
@@ -101,7 +69,31 @@ trading-journal seed-demo
 The demo seed is idempotent, so running it more than once does not duplicate
 trades or snapshots.
 
-## Dashboard
+## Features
+
+| Area | What you can do |
+| --- | --- |
+| **Review trades** | Filter trades, inspect open and closed positions, correct imported fields, and record notes and review status. |
+| **Analyze risk and performance** | Explore P&L, drawdown, R multiples, risk consistency, streaks, and a transparent Journal Score. |
+| **Import and synchronize** | Validate flexible CSV files or optionally synchronize TradeLocker data without placing orders. |
+| **Find data problems** | Flag missing or estimated values, duplicates, sync conflicts, and trades needing review. |
+| **Keep control of your data** | Use local SQLite storage, CSV/JSON exports, zip backups, conservative restore, and CLI workflows. |
+
+## Current Scope
+
+This repo is intentionally small and complete for its current purpose:
+
+- Local, single-user SQLite app.
+- Forex-focused trade journaling and review.
+- CSV import plus optional TradeLocker read-only sync.
+- No live trading or broker-side write actions.
+- No cloud backend, authentication system, subscriptions, teams, or mobile app.
+- No MT4, MT5, cTrader, or other broker connectors today.
+
+Additional broker support could be added later, but the public promise of this
+project is currently limited to CSV import and TradeLocker read-only sync.
+
+## Dashboard Views
 
 Launch the dashboard with:
 
@@ -200,7 +192,8 @@ Required fields:
 Numbers such as `$1,234.50` and `(12.50)` are parsed. Invalid rows are reported
 with reasons and are not silently imported.
 
-Common aliases:
+<details>
+<summary><strong>Supported CSV column aliases</strong></summary>
 
 | Canonical field | Accepted aliases |
 | --- | --- |
@@ -220,6 +213,8 @@ Common aliases:
 | `net_pnl` | `net_profit`, `profit`, `net`, `realized_pnl` |
 | `notes` | `note`, `comment`, `journal`, `remarks` |
 | `external_id` | `id`, `trade_id`, `ticket`, `order_id`, `deal_id`, `ref` |
+
+</details>
 
 ## TradeLocker Sync
 
